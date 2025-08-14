@@ -1,76 +1,87 @@
-import cv2
-import numpy as np
-import pytesseract
-import imagehash
+# photo_guard_free.py  (simple: too_dark | text_heavy | ok)
+import cv2, numpy as np, pytesseract, csv, argparse, requests
 from PIL import Image
-import csv
-import argparse
-import os
 
-def is_black_image(image, threshold=15):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    mean_val = cv2.mean(gray)[0]
-    return mean_val < threshold
+# ---- 튜닝 가능한 임계값 ----
+# 너무 어두움: V채널 평균/표준편차 + 저밝기 픽셀 비율로 판단
+V_MEAN_THR = 40          # 평균 밝기(0~255)
+V_STD_THR  = 20          # 밝기 분산이 너무 크면 제외 (플래시/밝은 영역 혼재 방지)
+DARK_RATIO_THR = 0.80    # 매우 어두운 픽셀(<=25)이 80% 이상이면 too_dark
 
-def detect_text_density(image, tesslang="eng"):
-    pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    text = pytesseract.image_to_string(pil_img, lang=tesslang)
+# 텍스트 과다: OCR 글자수 + 텍스트 박스 면적 비율
+TEXT_CHAR_THR = 120      # 글자 수 기준
+TEXT_AREA_RATIO_THR = 0.08  # 텍스트 bbox 총 면적 / 이미지 면적
+
+def is_too_dark(img):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    v = hsv[:, :, 2].astype(np.float32)
+    v_mean = float(np.mean(v))
+    v_std  = float(np.std(v))
+    dark_ratio = float(np.mean(v <= 25))
+    return (v_mean < V_MEAN_THR and v_std < V_STD_THR) or (dark_ratio >= DARK_RATIO_THR)
+
+def text_stats(img, lang="kor+eng"):
+    # OCR 결과: 글자수 / 텍스트 박스 면적비
+    pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    data = pytesseract.image_to_data(pil, lang=lang, output_type=pytesseract.Output.DICT)
+    text = pytesseract.image_to_string(pil, lang=lang)
     num_chars = len(text.strip())
-    return num_chars
 
-def detect_map_like(image):
-    # 간단히 색 분포와 edge를 보고 지도/캡처 비슷한 패턴인지 판별
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    # 채도가 낮고(회색 위주), edge가 많은 경우를 캡처로 가정
-    sat_mean = np.mean(hsv[:,:,1])
-    edges = cv2.Canny(image, 100, 200)
-    edge_density = np.sum(edges > 0) / edges.size
-    return sat_mean < 60 and edge_density > 0.05
+    h, w = img.shape[:2]
+    total = h * w
+    box_area = 0
+    for i in range(len(data['text'])):
+        s = data['text'][i].strip()
+        conf = data['conf'][i]
+        conf = int(conf) if isinstance(conf, str) and conf.isdigit() else -1
+        if s and conf >= 60:
+            box_area += int(data['width'][i]) * int(data['height'][i])
+    area_ratio = (box_area / total) if total > 0 else 0.0
+    return num_chars, area_ratio
 
-def analyze_image(url, tesslang="eng"):
+def analyze_image(url, lang="kor+eng"):
     try:
-        import requests
-        resp = requests.get(url, timeout=15)
-        img_array = np.frombuffer(resp.content, np.uint8)
-        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        if image is None:
-            return "invalid", "이미지를 열 수 없음"
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        arr = np.frombuffer(resp.content, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return "error", "이미지를 열 수 없음"
 
-        if is_black_image(image):
-            return "black", "검은 화면"
-        text_chars = detect_text_density(image, tesslang)
-        if text_chars > 15:  # 텍스트가 많으면 송장/문서 가능성
-            return "text_only", f"글자 수 {text_chars}"
-        if detect_map_like(image):
-            return "map_capture", "지도/캡처 화면"
+        # A) 너무 어두움
+        if is_too_dark(img):
+            return "too_dark", "어두움"
+
+        # B) 텍스트 과다
+        num_chars, area_ratio = text_stats(img, lang=lang)
+        if num_chars >= TEXT_CHAR_THR and area_ratio >= TEXT_AREA_RATIO_THR:
+            return "text_heavy", f"글자수 {num_chars}, 면적비 {area_ratio:.3f}"
+
+        # C) 정상
         return "ok", "정상"
     except Exception as e:
+        # Tesseract 미설치/실패 등도 여기로
         return "error", str(e)
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="input csv path")
-    parser.add_argument("--output", required=True, help="output csv path")
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--tesslang", type=str, default="eng")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input", required=True)
+    ap.add_argument("--output", required=True)
+    ap.add_argument("--workers", type=int, default=4)  # 호환용(미사용)
+    ap.add_argument("--tesslang", default="kor+eng")
+    args = ap.parse_args()
 
-    with open(args.input, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+    with open(args.input, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
 
-    out_rows = []
-    for row in rows:
-        pid = row["photo_id"]
-        url = row["url"]
-        label, reason = analyze_image(url, args.tesslang)
-        out_rows.append({"photo_id": pid, "label": label, "reason": reason})
+    out = []
+    for r in rows:
+        label, reason = analyze_image(r["url"], lang=args.tesslang)
+        out.append({"photo_id": r["photo_id"], "label": label, "reason": reason})
 
     with open(args.output, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["photo_id", "label", "reason"])
-        writer.writeheader()
-        for r in out_rows:
-            writer.writerow(r)
+        w = csv.DictWriter(f, fieldnames=["photo_id","label","reason"])
+        w.writeheader(); w.writerows(out)
 
 if __name__ == "__main__":
     main()
