@@ -1,7 +1,7 @@
 name: PhotoGuard (manual-parallel)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 수동 실행 버튼
 
 jobs:
   run:
@@ -9,15 +9,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0,1,2,3,4,5,6,7]   # 8-way 병렬
-        shards: [8]
+        shard: [0,1,2,3,4,5,6,7]   # 병렬 샤드 번호
+        shards: [8]                # 총 샤드 수 (16으로 올리면 더 빨라짐)
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: 'pip'
-      - run: python -m pip install -r requirements.txt
+          cache: "pip"   # requirements 캐시
+
+      - name: Install Tesseract OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+          tesseract --version
+
+      - name: Install Python deps
+        run: python -m pip install -r requirements.txt
+
       - name: Run shard
         env:
           GAS_URL: ${{ secrets.GAS_URL }}
