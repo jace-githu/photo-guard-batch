@@ -20,9 +20,17 @@ def run_analyzer(items):
             w = csv.writer(f); w.writerow(["photo_id","url"])
             for it in items:
                 w.writerow([f"R{it['row']}", it["url"]])
-        # 무료 분석기 실행
-        cmd = ["python", "photo_guard_free.py", "--input", inp, "--output", out, "--workers", "8", "--tesslang", "eng"]
+
+        # 무료 분석기 실행 (언어옵션 kor+eng 로 변경)
+        cmd = [
+            "python", "photo_guard_free.py",
+            "--input", inp,
+            "--output", out,
+            "--workers", "8",
+            "--tesslang", "kor+eng"   # ★ 여기만 eng -> kor+eng
+        ]
         subprocess.check_call(cmd)
+
         # 결과 읽기
         out_rows = []
         with open(out, "r", encoding="utf-8") as f:
@@ -38,8 +46,8 @@ def apply_results(items, out_rows):
         r = by_id.get(rid)
         if r:
             results.append({"row": it["row"], "label": r.get("label",""), "reason": r.get("reason","")})
-    if not results: 
-        print("no results to apply"); 
+    if not results:
+        print("no results to apply")
         return
     payload = {"results": results, "batch": True}
     r = requests.post(GAS_URL, params={"mode":"apply", "token":GAS_TOKEN}, json=payload, timeout=120)
